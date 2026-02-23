@@ -150,6 +150,12 @@ data "helm_template" "hcloud_csi" {
         ]
         volumeExtraLabels = var.hcloud_csi_volume_extra_labels
       }
+      metrics = {
+        enabled = true
+        serviceMonitor = {
+          enabled = true
+        }
+      }
       storageClasses = local.hcloud_csi_storage_classes
     }),
     yamlencode(var.hcloud_csi_helm_values)
