@@ -76,12 +76,6 @@ variable "cluster_talosconfig_path" {
   description = "If not null, the talosconfig will be written to a file speficified."
 }
 
-variable "cluster_graceful_destroy" {
-  type        = bool
-  default     = true
-  description = "Determines whether a graceful destruction process is enabled for Talos nodes. When enabled, it ensures that nodes are properly drained and decommissioned before being destroyed, minimizing disruption in the cluster."
-}
-
 variable "cluster_healthcheck_enabled" {
   type        = bool
   default     = true
@@ -116,7 +110,7 @@ variable "talosctl_version_check_enabled" {
 
 variable "talosctl_retries" {
   type        = number
-  default     = 10
+  default     = 100
   description = "Specifies how many times talosctl operations should retry before failing. This setting helps improve resilience against transient network issues or temporary API unavailability."
 
   validation {
@@ -501,15 +495,6 @@ variable "cluster_autoscaler_nodepools" {
   }
 
   validation {
-    condition = sum(concat(
-      [for control_nodepool in var.control_plane_nodepools : coalesce(control_nodepool.count, 1)],
-      [for worker_nodepool in var.worker_nodepools : coalesce(worker_nodepool.count, 1)],
-      [for cluster_autoscaler_nodepools in var.cluster_autoscaler_nodepools : cluster_autoscaler_nodepools.max]
-    )) <= 100
-    error_message = "The total count of nodes must not exceed 100."
-  }
-
-  validation {
     condition = alltrue([
       for np in var.cluster_autoscaler_nodepools : contains([
         "fsn1", "nbg1", "hel1", "ash", "hil", "sin"
@@ -534,7 +519,7 @@ variable "cluster_autoscaler_config_patches" {
 
 variable "cluster_autoscaler_discovery_enabled" {
   type        = bool
-  default     = false
+  default     = true
   description = "Enable rolling upgrades of Cluster Autoscaler nodes during Talos OS upgrades and Talos configuration changes."
 }
 
@@ -576,7 +561,7 @@ variable "packer_arm64_builder" {
 # Talos
 variable "talos_version" {
   type        = string
-  default     = "v1.11.6" # https://github.com/siderolabs/talos
+  default     = "v1.12.7" # https://github.com/siderolabs/talos
   description = "Specifies the version of Talos to be used in generated machine configurations."
 }
 
@@ -618,6 +603,23 @@ variable "talos_upgrade_reboot_mode" {
   validation {
     condition     = var.talos_upgrade_reboot_mode == null || contains(["default", "powercycle"], var.talos_upgrade_reboot_mode)
     error_message = "The talos_upgrade_reboot_mode must be \"default\" or \"powercycle\"."
+  }
+}
+
+variable "talos_reboot_debug" {
+  type        = bool
+  default     = false
+  description = "Enable debug operation from kernel logs during Talos reboots. When true, --wait is set to true by talosctl."
+}
+
+variable "talos_reboot_mode" {
+  type        = string
+  default     = null
+  description = "Select the reboot mode. Mode \"powercycle\" bypasses kexec, and mode \"force\" skips graceful teardown. Valid values: \"default\", \"powercycle\", or \"force\"."
+
+  validation {
+    condition     = var.talos_reboot_mode == null || contains(["default", "powercycle", "force"], var.talos_reboot_mode)
+    error_message = "The talos_reboot_mode must be \"default\", \"powercycle\", or \"force\"."
   }
 }
 
@@ -677,12 +679,18 @@ variable "talos_kernel_modules" {
 variable "talos_machine_configuration_apply_mode" {
   type        = string
   default     = "auto"
-  description = "Determines how changes to Talos machine configurations are applied. 'auto' (default) applies changes immediately and reboots if necessary. 'reboot' applies changes and then reboots the node. 'no_reboot' applies changes immediately without a reboot, failing if a reboot is required. 'staged' stages changes to apply on the next reboot without initiating a reboot."
+  description = "Determines how changes to Talos machine configurations are applied. 'auto' (default) applies changes immediately and reboots if necessary. 'reboot' applies changes and then reboots the node. 'no_reboot' applies changes immediately without a reboot, failing if a reboot is required. 'staged' stages changes to apply on the next reboot. 'staged_if_needing_reboot' performs a dry-run and uses 'staged' mode if reboot is needed, 'auto' otherwise."
 
   validation {
-    condition     = contains(["auto", "reboot", "no_reboot", "staged"], var.talos_machine_configuration_apply_mode)
-    error_message = "The talos_machine_configuration_apply_mode must be 'auto', 'reboot', 'no_reboot', or 'staged'."
+    condition     = contains(["auto", "reboot", "no_reboot", "staged", "staged_if_needing_reboot"], var.talos_machine_configuration_apply_mode)
+    error_message = "The talos_machine_configuration_apply_mode must be 'auto', 'reboot', 'no_reboot', 'staged', or 'staged_if_needing_reboot'."
   }
+}
+
+variable "talos_staged_configuration_automatic_reboot_enabled" {
+  type        = bool
+  default     = true
+  description = "Determines whether nodes are rebooted automatically after Talos machine configuration changes are applied in 'staged' mode, or when 'staged_if_needing_reboot' resolves to 'staged' mode."
 }
 
 variable "talos_sysctls_extra_args" {
@@ -732,6 +740,72 @@ variable "talos_extra_routes" {
   }
 }
 
+variable "talos_certificates" {
+  type        = any
+  default     = {}
+  description = <<-EOF
+    Additional trusted CA certificates to be added to the Talos configuration.
+    Map keys are used as names for the TrustedRootsConfig documents.
+    Values can be either a single PEM-encoded string containing one or more certificates (inline or from file), or a list of PEM-encoded strings.
+
+    Example:
+    ```hcl
+    talos_certificates = {
+      # Inline string (single certificate)
+      "inline-ca" = "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
+
+      # Single certificate from file
+      "file-ca" = [file("ca.crt")]
+
+      # Multiple certificates from files (chain)
+      "corporate-chain" = [file("root.crt"), file("intermediate.crt")]
+
+      # Multiple inline certificates in a single string (backward compatible)
+      "legacy-ca" = <<-EOT
+        -----BEGIN CERTIFICATE-----
+        ...
+        -----END CERTIFICATE-----
+        -----BEGIN CERTIFICATE-----
+        ...
+        -----END CERTIFICATE-----
+      EOT
+    }
+    ```
+  EOF
+
+  validation {
+    condition     = var.talos_certificates == null ? true : can(keys(var.talos_certificates))
+    error_message = "The 'talos_certificates' variable must be a map."
+  }
+
+  validation {
+    condition = var.talos_certificates == null ? true : alltrue([
+      for name, chain in var.talos_certificates :
+      can(regex("^[a-z0-9-]+$", name))
+    ])
+    error_message = "Trusted root certificates config names must be lowercase alphanumeric and may contain hyphens."
+  }
+
+  validation {
+    condition = var.talos_certificates == null ? true : alltrue([
+      for chain in values(var.talos_certificates) :
+      length(can(tolist(chain)) ? tolist(chain) : [tostring(chain)]) > 0
+    ])
+    error_message = "Each certificate group in 'talos_certificates' must contain at least one certificate."
+  }
+
+  validation {
+    condition = var.talos_certificates == null ? true : alltrue([
+      for chain in values(var.talos_certificates) :
+      alltrue([
+        for cert in(can(tolist(chain)) ? tolist(chain) : [tostring(chain)]) :
+        can(regex("(?s)-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", cert))
+      ])
+    ])
+    error_message = "All certificates must be valid PEM-encoded strings containing BEGIN/END CERTIFICATE markers."
+  }
+}
+
 variable "talos_coredns_enabled" {
   type        = bool
   default     = true
@@ -747,16 +821,16 @@ variable "talos_nameservers" {
   description = "Specifies a list of IPv4 and IPv6 nameserver addresses used for DNS resolution by nodes and CoreDNS within the cluster."
 }
 
-variable "talos_extra_host_entries" {
+variable "talos_static_hosts" {
   type = list(object({
-    ip      = string
-    aliases = list(string)
+    ip        = string
+    hostnames = list(string)
   }))
   default     = []
-  description = "Specifies additional host entries to be added on each node. Each entry must include an IP address and a list of aliases associated with that IP."
+  description = "Specifies static host mappings to be added on each node. Each entry must include an IP address and a list of hostnames associated with that IP."
 }
 
-variable "talos_time_servers" {
+variable "talos_ntp_servers" {
   type = list(string)
   default = [
     "ntp1.hetzner.de",
@@ -898,7 +972,7 @@ variable "talos_backup_schedule" {
 # Kubernetes
 variable "kubernetes_version" {
   type        = string
-  default     = "v1.33.8" # https://github.com/kubernetes/kubernetes
+  default     = "v1.33.10" # https://github.com/kubernetes/kubernetes
   description = "Specifies the Kubernetes version to deploy."
 }
 
@@ -912,6 +986,72 @@ variable "kubernetes_kubelet_extra_config" {
   type        = any
   default     = {}
   description = "Specifies additional configuration settings for the kubelet service. These settings can customize or override default kubelet configurations, allowing for tailored cluster behavior."
+}
+
+variable "kubernetes_apiserver_image" {
+  type        = string
+  default     = null
+  description = "Specifies a custom image repository for kube-apiserver (e.g., 'my-registry.io/kube-apiserver'). The version tag is appended automatically from kubernetes_version. When set, this image is used during both machine configuration and Kubernetes upgrades, preventing custom images from being reset to upstream defaults."
+
+  validation {
+    condition     = var.kubernetes_apiserver_image == null || can(regex("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$", var.kubernetes_apiserver_image))
+    error_message = "The image must be a valid container image reference without a tag (e.g., 'my-registry.io/kube-apiserver'). The version tag is appended automatically from kubernetes_version."
+  }
+}
+
+variable "kubernetes_controller_manager_image" {
+  type        = string
+  default     = null
+  description = "Specifies a custom image repository for kube-controller-manager (e.g., 'my-registry.io/kube-controller-manager'). The version tag is appended automatically from kubernetes_version. When set, this image is used during both machine configuration and Kubernetes upgrades, preventing custom images from being reset to upstream defaults."
+
+  validation {
+    condition     = var.kubernetes_controller_manager_image == null || can(regex("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$", var.kubernetes_controller_manager_image))
+    error_message = "The image must be a valid container image reference without a tag (e.g., 'my-registry.io/kube-controller-manager'). The version tag is appended automatically from kubernetes_version."
+  }
+}
+
+variable "kubernetes_scheduler_image" {
+  type        = string
+  default     = null
+  description = "Specifies a custom image repository for kube-scheduler (e.g., 'my-registry.io/kube-scheduler'). The version tag is appended automatically from kubernetes_version. When set, this image is used during both machine configuration and Kubernetes upgrades, preventing custom images from being reset to upstream defaults."
+
+  validation {
+    condition     = var.kubernetes_scheduler_image == null || can(regex("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$", var.kubernetes_scheduler_image))
+    error_message = "The image must be a valid container image reference without a tag (e.g., 'my-registry.io/kube-scheduler'). The version tag is appended automatically from kubernetes_version."
+  }
+}
+
+variable "kubernetes_proxy_image" {
+  type        = string
+  default     = null
+  description = "Specifies a custom image repository for kube-proxy (e.g., 'my-registry.io/kube-proxy'). The version tag is appended automatically from kubernetes_version. When set, this image is used during both machine configuration and Kubernetes upgrades, preventing custom images from being reset to upstream defaults."
+
+  validation {
+    condition     = var.kubernetes_proxy_image == null || can(regex("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$", var.kubernetes_proxy_image))
+    error_message = "The image must be a valid container image reference without a tag (e.g., 'my-registry.io/kube-proxy'). The version tag is appended automatically from kubernetes_version."
+  }
+}
+
+variable "kubernetes_kubelet_image" {
+  type        = string
+  default     = null
+  description = "Specifies a custom image repository for the kubelet (e.g., 'my-registry.io/kubelet'). The version tag is appended automatically from kubernetes_version. When set, this image is used during both machine configuration and Kubernetes upgrades, preventing custom images from being reset to upstream defaults."
+
+  validation {
+    condition     = var.kubernetes_kubelet_image == null || can(regex("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+$", var.kubernetes_kubelet_image))
+    error_message = "The image must be a valid container image reference without a tag (e.g., 'my-registry.io/kubelet'). The version tag is appended automatically from kubernetes_version."
+  }
+}
+
+variable "kubernetes_etcd_image" {
+  type        = string
+  default     = null
+  description = "Specifies a custom container image for etcd including the tag and/or digest (e.g., 'my-registry.io/etcd:v3.6.8', 'my-registry.io/etcd:v3.6.8@sha256:...', or 'my-registry.io/etcd@sha256:...'). This change will only take effect after a manual reboot of your cluster nodes!"
+
+  validation {
+    condition     = var.kubernetes_etcd_image == null || can(regex("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+((:[a-zA-Z0-9][a-zA-Z0-9._-]*)(@[a-z0-9]+:[a-f0-9]+)?|@[a-z0-9]+:[a-f0-9]+)$", var.kubernetes_etcd_image))
+    error_message = "The image must be a valid container image reference with a tag and/or digest (e.g., 'my-registry.io/etcd:v3.6.8' or 'my-registry.io/etcd:v3.6.8@sha256:...')."
+  }
 }
 
 
@@ -950,7 +1090,7 @@ variable "talos_ccm_enabled" {
 
 variable "talos_ccm_version" {
   type        = string
-  default     = "v1.11.0" # https://github.com/siderolabs/talos-cloud-controller-manager
+  default     = "v1.12.0" # https://github.com/siderolabs/talos-cloud-controller-manager
   description = "Specifies the version of the Talos Cloud Controller Manager (CCM) to use. This version controls cloud-specific integration features in the Talos operating system."
 }
 
@@ -1111,7 +1251,7 @@ variable "hcloud_ccm_helm_chart" {
 
 variable "hcloud_ccm_helm_version" {
   type        = string
-  default     = "1.30.0"
+  default     = "1.30.1"
   description = "Version of the Hcloud CCM Helm chart to deploy."
 }
 
@@ -1257,7 +1397,7 @@ variable "hcloud_csi_helm_chart" {
 
 variable "hcloud_csi_helm_version" {
   type        = string
-  default     = "2.19.0"
+  default     = "2.20.2"
   description = "Version of the Hcloud CSI Helm chart to deploy."
 }
 
@@ -1322,7 +1462,7 @@ variable "longhorn_helm_chart" {
 
 variable "longhorn_helm_version" {
   type        = string
-  default     = "1.10.2"
+  default     = "1.11.1"
   description = "Version of the Longhorn Helm chart to deploy."
 }
 
@@ -1366,7 +1506,7 @@ variable "cilium_helm_chart" {
 
 variable "cilium_helm_version" {
   type        = string
-  default     = "1.18.7"
+  default     = "1.18.9"
   description = "Version of the Cilium Helm chart to deploy."
 }
 
@@ -1605,7 +1745,7 @@ variable "cert_manager_helm_chart" {
 
 variable "cert_manager_helm_version" {
   type        = string
-  default     = "v1.19.3"
+  default     = "v1.20.2"
   description = "Version of the Cert Manager Helm chart to deploy."
 }
 
@@ -1637,7 +1777,7 @@ variable "ingress_nginx_helm_chart" {
 
 variable "ingress_nginx_helm_version" {
   type        = string
-  default     = "4.14.3"
+  default     = "4.15.1"
   description = "Version of the Ingress NGINX Controller Helm chart to deploy."
 }
 
@@ -1655,6 +1795,17 @@ variable "ingress_nginx_enabled" {
   validation {
     condition     = var.ingress_nginx_enabled ? var.cert_manager_enabled : true
     error_message = "Ingress NGINX can only be enabled if cert-manager is also enabled."
+  }
+}
+
+variable "ingress_nginx_deprecation_ignored" {
+  type        = bool
+  default     = false
+  description = "Acknowledges that ingress-nginx is deprecated. Must be set to true when ingress_nginx_enabled is true."
+
+  validation {
+    condition     = var.ingress_nginx_enabled ? var.ingress_nginx_deprecation_ignored : true
+    error_message = "Ingress NGINX is deprecated. Set ingress_nginx_deprecation_ignored = true to enable ingress_nginx_enabled."
   }
 }
 
@@ -1927,6 +2078,6 @@ variable "prometheus_operator_crds_enabled" {
 
 variable "prometheus_operator_crds_version" {
   type        = string
-  default     = "v0.89.0" # https://github.com/prometheus-operator/prometheus-operator
+  default     = "v0.90.1" # https://github.com/prometheus-operator/prometheus-operator
   description = "Specifies the version of the Prometheus Operator Custom Resource Definitions (CRDs) to deploy."
 }

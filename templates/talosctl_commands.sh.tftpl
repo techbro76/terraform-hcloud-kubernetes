@@ -69,6 +69,18 @@ talos_apply_config() {
     "$@"
 }
 
+talos_reboot() {
+  talosctl reboot \
+    --talosconfig "$talosconfig" \
+%{ if talos_reboot_debug ~}
+    --debug \
+%{ endif ~}
+%{ if talos_reboot_mode != null ~}
+    --mode '${talos_reboot_mode}' \
+%{ endif ~}
+    "$@"
+}
+
 talos_upgrade_k8s() {
   awk -v talosconfig="$talosconfig" '
     function indent(s) { return match(s, /[^[:space:]]/) ? RSTART - 1 : 0 }
@@ -89,6 +101,21 @@ talos_upgrade_k8s() {
       run = run " --endpoint "    sq "${kube_api_url}" sq
       run = run " --to "          sq "${kubernetes_version}" sq
       run = run " --with-docs=false --with-examples=false"
+%{ if kubernetes_apiserver_image != null ~}
+      run = run " --apiserver-image " sq "${kubernetes_apiserver_image}" sq
+%{ endif ~}
+%{ if kubernetes_controller_manager_image != null ~}
+      run = run " --controller-manager-image " sq "${kubernetes_controller_manager_image}" sq
+%{ endif ~}
+%{ if kubernetes_scheduler_image != null ~}
+      run = run " --scheduler-image " sq "${kubernetes_scheduler_image}" sq
+%{ endif ~}
+%{ if kubernetes_proxy_image != null ~}
+      run = run " --proxy-image " sq "${kubernetes_proxy_image}" sq
+%{ endif ~}
+%{ if kubernetes_kubelet_image != null ~}
+      run = run " --kubelet-image " sq "${kubernetes_kubelet_image}" sq
+%{ endif ~}
       run = run " ; printf " sq "\\037RC=%d\\n" sq " $?"
 
       in_secret  = 0

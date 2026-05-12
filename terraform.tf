@@ -4,12 +4,12 @@ terraform {
   required_providers {
     talos = {
       source  = "siderolabs/talos"
-      version = "0.9.0"
+      version = "0.11.0"
     }
 
     hcloud = {
       source  = "hetznercloud/hcloud"
-      version = "1.60.0"
+      version = "1.60.1"
     }
 
     helm = {
